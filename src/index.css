@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply m-0 p-0 text-gray-100 bg-[#0F172A]; 
+    font-family: 'Inter', -apple-system, sans-serif;
+  }
+  
+  /* Custom scrollbar for webkit */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.02);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}
+
+.glass-panel {
+  @apply bg-surface/80 backdrop-blur-lg border border-white/10 shadow-xl;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  @apply font-bold mt-4 mb-2;
+}
+
+.markdown-body h1 { @apply text-2xl; }
+.markdown-body h2 { @apply text-xl; }
+.markdown-body h3 { @apply text-lg; }
+
+.markdown-body p {
+  @apply leading-relaxed mb-4;
+}
+
+.markdown-body a {
+  @apply text-primary hover:text-secondary underline transition-colors;
+}
+
+.markdown-body code {
+  @apply bg-black/40 text-blue-300 px-1.5 py-0.5 rounded text-sm font-mono;
+}
+
+.markdown-body pre {
+  @apply bg-black/40 p-4 rounded-lg my-4 overflow-x-auto border border-white/5;
+}
+
+.markdown-body pre code {
+  @apply bg-transparent p-0 text-gray-200 text-sm;
+}
