@@ -6,11 +6,9 @@ import remarkBreaks from 'remark-breaks';
 import {
     Settings, Bot, Send, Loader2, Power, Terminal, Save,
     Plus, MessageSquare, ChevronRight, ChevronDown, Cpu, Brain,
-    Hash, Copy, Check, CheckCircle2, Square, Trash2, ListPlus, X,
-    Zap,
+    Hash, Copy, Check, CheckCircle2, Square, Trash2, ListPlus,
     Repeat,
-    CheckCircle,
-    Clock // Added Clock
+    Clock
 } from 'lucide-react';
 
 import Modal from './components/Modal';
@@ -2199,7 +2197,6 @@ export default function App() {
                                             isLastGroup={i === groupedMessages.length - 1}
                                             userAvatar={userAvatar}
                                             agentAvatar={agentAvatar}
-                                            activeAgent={activeAgent}
                                             displayName={agents.find(a => a.key === activeAgent)?.displayName || activeAgent || 'Agent'}
                                             effectiveModelDisplay={effectiveModelDisplay}
                                             enableThinking={(() => {
@@ -2804,6 +2801,24 @@ export default function App() {
                 </div>
             </Modal>
 
+            {/* Toast Notifications */}
+            <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-3 pointer-events-none">
+                {toasts.map(toast => (
+                    <div
+                        key={toast.id}
+                        className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl border flex items-center gap-3 animate-in slide-in-from-right-10 duration-300 min-w-[280px] backdrop-blur-xl ${toast.type === 'success' ? 'bg-green-500/20 border-green-500/30 text-green-200' :
+                            toast.type === 'error' ? 'bg-red-500/20 border-red-500/30 text-red-200' :
+                                'bg-blue-500/20 border-blue-500/30 text-blue-200'
+                            }`}
+                    >
+                        {toast.type === 'success' ? <CheckCircle size={18} /> :
+                            toast.type === 'error' ? <Loader2 className="animate-spin" size={18} /> :
+                                <Brain size={18} />
+                        }
+                        <span className="text-sm font-medium tracking-wide">{toast.message}</span>
+                    </div>
+                ))}
+            </div>
         </div >
     );
 }
