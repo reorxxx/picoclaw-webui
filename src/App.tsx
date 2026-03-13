@@ -8,6 +8,7 @@ import {
     Plus, MessageSquare, ChevronRight, ChevronDown, Cpu, Brain,
     Hash, Copy, Check, CheckCircle2, Square, Trash2, ListPlus,
     Repeat,
+    CheckCircle,
     Clock
 } from 'lucide-react';
 
