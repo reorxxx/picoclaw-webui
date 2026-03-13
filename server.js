@@ -16,9 +16,23 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// --- Path & Home Helpers (Fixed for Raspberry Pi / deployment environments) ---
+function getHomeDir() {
+  return os.homedir() || process.env.HOME || '/home/pi'; // last fallback for common raspbian setup
+}
+
+const HOME = getHomeDir();
+const PICOCLAW_CONFIG_PATH = process.env.PICOCLAW_CONFIG || path.join(HOME, '.picoclaw', 'config.json');
+const CRON_FILE = path.join(HOME, '.picoclaw', 'web_cron.json');
+const CRON_LOG = path.join(HOME, '.picoclaw', 'web_cron.log');
+
+console.log('--- PicoClaw WebUI Backend Initializing ---');
+console.log(`[INIT] Resolved HOME: ${HOME}`);
+console.log(`[INIT] CONFIG PATH: ${PICOCLAW_CONFIG_PATH}`);
+console.log(`[INIT] CRON FILE: ${CRON_FILE}`);
+console.log('-------------------------------------------');
+
 // --- Web Cron Service ---
-const CRON_FILE = path.join(os.homedir(), '.picoclaw', 'web_cron.json');
-const CRON_LOG = path.join(os.homedir(), '.picoclaw', 'web_cron.log');
 
 function logCron(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -305,12 +319,11 @@ app.get('/api/agents/:agentKey/avatars/:filename', async (req, res) => {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const PICOCLAW_CONFIG_PATH = process.env.PICOCLAW_CONFIG
-  || path.join(process.env.HOME || '', '.picoclaw', 'config.json');
+// PICOCLAW_CONFIG_PATH is now defined globally above using getHomeDir()
 
 // --- Meta Sidecar Helpers (for timestamps) ---
 function getMetaPath(sessionFilePath) {
-  return sessionFilePath.replace(/\.json$/, '.meta.json');
+  return sessionFilePath.replace(/\.jsonl?$/, '.meta.json');
 }
 
 function readSessionMeta(sessionFilePath) {
@@ -328,7 +341,27 @@ function saveSessionMeta(sessionFilePath, meta) {
 
 async function readConfig() {
   const content = await fs.promises.readFile(PICOCLAW_CONFIG_PATH, 'utf-8');
-  return JSON.parse(content);
+  const config = JSON.parse(content);
+  // Alias model_list to models for WebUI compatibility and normalize objects
+  if (config.model_list && !config.models) {
+    config.models = config.model_list.map(m => {
+      if (!m.id || !m.provider) {
+        // Attempt to parse provider/id from model_name (e.g. "nvidia/glm4.7")
+        const name = m.model_name || m.model || "";
+        const parts = name.split('/');
+        const provider = parts[0] || 'default';
+        const id = parts.slice(1).join('/') || parts[0];
+        return {
+          ...m,
+          provider: m.provider || provider,
+          id: m.id || id,
+          displayName: m.displayName || m.model_name || m.model || id
+        };
+      }
+      return m;
+    });
+  }
+  return config;
 }
 
 app.get('/api/config', async (req, res) => {
@@ -338,27 +371,107 @@ app.get('/api/config', async (req, res) => {
 
 app.post('/api/config', async (req, res) => {
   try {
-    await fs.promises.writeFile(PICOCLAW_CONFIG_PATH, JSON.stringify(req.body, null, 2));
+    const config = req.body;
+    // Map models back to model_list for Go backend compatibility
+    if (config.models) {
+      config.model_list = config.models;
+    }
+    await fs.promises.writeFile(PICOCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: 'Failed to write config' }); }
 });
 
 // ─── Agent helpers ───────────────────────────────────────────────────────────
 
+// ─── Agent helpers ───────────────────────────────────────────────────────────
+
+function normalizeAgents(config) {
+  if (!config?.agents) return {};
+  let map = {};
+
+  // If it has a 'list' property, it's the new format
+  if (Array.isArray(config.agents.list)) {
+    config.agents.list.forEach(agent => {
+      if (agent.id) map[agent.id] = agent;
+    });
+
+    // New format (picoclaw_src) might not explicitly define 'main' in the list
+    // but the Go backend creates it implicitly from defaults.
+    if (!map['main']) {
+      map['main'] = {
+        id: 'main',
+        name: '默认 Agent',
+        workspace: config.agents.defaults?.workspace || '~/.picoclaw/workspace',
+        model: config.agents.defaults?.model || '',
+        model_name: config.agents.defaults?.model_name || ''
+      };
+    }
+  } else {
+    // Legacy map format
+    map = { ...config.agents };
+    delete map.defaults;
+  }
+  return map;
+}
+
 function resolveWorkspace(workspacePath) {
-  return (workspacePath || '~/.picoclaw/workspace')
-    .replace('~', process.env.HOME || '');
+  const ws = workspacePath || '~/.picoclaw/workspace';
+  if (ws.startsWith('~')) {
+    return path.resolve(HOME, ws.slice(1).replace(/^[/\\]+/, ''));
+  }
+  return path.resolve(ws);
 }
 
 async function getAgentWorkspace(agentKey) {
   const config = await readConfig();
-  const agentCfg = config?.agents?.[agentKey];
+  const agents = normalizeAgents(config);
+  const agentCfg = agents[agentKey];
+  // Fallback to main if specific agent key is lost or not found
+  if (!agentCfg && agentKey !== 'main') {
+    const mainCfg = agents['main'];
+    if (mainCfg) return resolveWorkspace(mainCfg.workspace);
+  }
   if (!agentCfg) throw new Error(`Agent '${agentKey}' not found in config`);
   return resolveWorkspace(agentCfg.workspace);
 }
 
+// ─── Session helpers ─────────────────────────────────────────────────────────
+
 function getSessionsDir(workspace) {
   return path.join(workspace, 'sessions');
+}
+
+function readJsonl(filePath) {
+  try {
+    const metaPath = getMetaPath(filePath);
+    let skip = 0;
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        skip = meta.skip || meta.Skip || 0;
+      } catch (e) { }
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n')
+      .filter(line => line.trim());
+
+    // Support logical truncation (Skip) from Go core
+    const activeLines = skip > 0 ? lines.slice(skip) : lines;
+
+    return activeLines.map(line => {
+      try {
+        return JSON.parse(line);
+      } catch (e) {
+        console.error(`[JSONL] Failed to parse line in ${filePath}:`, e.message);
+        return null;
+      }
+    })
+      .filter(msg => msg !== null);
+  } catch (e) {
+    console.error(`[JSONL] Error reading ${filePath}:`, e.message);
+    return [];
+  }
 }
 
 // Read workspace identity/memory files for system prompt
@@ -404,21 +517,34 @@ function saveAgentMeta(workspace, meta) {
 app.get('/api/agents', async (req, res) => {
   try {
     const config = await readConfig();
-    const agents = Object.entries(config?.agents || {}).map(([key, cfg]) => {
+    const agentsMap = normalizeAgents(config);
+    const agents = Object.entries(agentsMap).map(([key, cfg]) => {
       const workspace = resolveWorkspace(cfg.workspace);
       let sessionCount = 0;
       let lastActive = '';
       const sessionsDir = getSessionsDir(workspace);
       try {
-        const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json') && f !== 'heartbeat.json');
+        const files = fs.readdirSync(sessionsDir).filter(f => {
+          return (f.endsWith('.json') || f.endsWith('.jsonl')) && f !== 'heartbeat.json' && f !== 'heartbeat.jsonl' && !f.endsWith('.migrated') && !f.endsWith('.meta.json');
+        });
         sessionCount = files.length;
 
         // Find the most recent updated timestamp across all sessions for this agent
         for (const f of files) {
           try {
-            const data = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), 'utf-8'));
-            if (data.updated && data.updated > lastActive) {
-              lastActive = data.updated;
+            const fpath = path.join(sessionsDir, f);
+            if (f.endsWith('.json')) {
+              const data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
+              if (data.updated && data.updated > lastActive) {
+                lastActive = data.updated;
+              }
+            } else if (f.endsWith('.jsonl')) {
+              const mpath = getMetaPath(fpath);
+              if (fs.existsSync(mpath)) {
+                const m = JSON.parse(fs.readFileSync(mpath, 'utf-8'));
+                const up = m.updated_at || m.UpdatedAt || '';
+                if (up && up > lastActive) lastActive = up;
+              }
             }
           } catch (e) { }
         }
@@ -431,14 +557,14 @@ app.get('/api/agents', async (req, res) => {
       return {
         key,
         workspace: cfg.workspace,
-        model: cfg.model || '',
+        model: cfg.model_name || (typeof cfg.model === 'string' ? cfg.model : cfg.model?.primary) || '',
         temperature: cfg.temperature,
         max_tokens: cfg.max_tokens,
         sessionCount,
         lastActive,
         hasIdentity,
         avatar: meta.avatar || '🤖',
-        displayName: meta.displayName || key,
+        displayName: meta.displayName || cfg.name || key,
         color: meta.color || null
       };
     });
@@ -644,7 +770,8 @@ _(Track user preferences and working style here.)_
     saveAgentMeta(resolvedWs, { avatar: '🤖', displayName: key, color: null });
 
     // Write agent config
-    config.agents[key] = {
+    const isNewFormat = Array.isArray(config.agents?.list);
+    const newAgentCfg = {
       workspace,
       restrict_to_workspace: true,
       model: model || config?.agents?.defaults?.model || '',
@@ -653,6 +780,14 @@ _(Track user preferences and working style here.)_
       max_tool_iterations: 20,
       stream: true
     };
+
+    if (isNewFormat) {
+      newAgentCfg.id = key;
+      newAgentCfg.name = key;
+      config.agents.list.push(newAgentCfg);
+    } else {
+      config.agents[key] = newAgentCfg;
+    }
     fs.writeFileSync(PICOCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
     res.json({ success: true, key });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -688,12 +823,21 @@ app.patch('/api/agents/:agentKey/meta', async (req, res) => {
 
     // 2. Update config.json (model, temperature, max_tokens)
     const config = await readConfig();
-    if (config.agents && config.agents[agentKey]) {
+    const isNewFormat = Array.isArray(config.agents?.list);
+
+    if (isNewFormat) {
+      const agent = config.agents.list.find(a => a.id === agentKey);
+      if (agent) {
+        if (req.body.model !== undefined) agent.model = req.body.model;
+        if (req.body.temperature !== undefined) agent.temperature = parseFloat(req.body.temperature);
+        if (req.body.max_tokens !== undefined) agent.max_tokens = parseInt(req.body.max_tokens);
+      }
+    } else if (config.agents && config.agents[agentKey]) {
       if (req.body.model !== undefined) config.agents[agentKey].model = req.body.model;
       if (req.body.temperature !== undefined) config.agents[agentKey].temperature = parseFloat(req.body.temperature);
       if (req.body.max_tokens !== undefined) config.agents[agentKey].max_tokens = parseInt(req.body.max_tokens);
-      fs.writeFileSync(PICOCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
     }
+    fs.writeFileSync(PICOCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
 
     res.json({ success: true, meta: updatedMeta });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -701,60 +845,128 @@ app.patch('/api/agents/:agentKey/meta', async (req, res) => {
 
 // ─── Sessions API ─────────────────────────────────────────────────────────────
 
-// List sessions for an agent
+// List sessions for an agent (supports JSON and JSONL)
 app.get('/api/agents/:agentKey/sessions', async (req, res) => {
   try {
     const workspace = await getAgentWorkspace(req.params.agentKey);
     const dir = getSessionsDir(workspace);
     if (!fs.existsSync(dir)) return res.json([]);
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && f !== 'heartbeat.json');
-    const sessions = files.map(f => {
-      try {
-        const data = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
-        return {
-          key: data.key || f.replace('.json', ''),
-          title: (data.summary || '').split('\n')[0].replace(/^#+\s*/, '').slice(0, 60) || data.key || f.replace('.json', ''),
-          model: data.model || data.webui_model || '',   // actual model used > per-session model override
-          messageCount: (data.messages || []).length,
-          updated: data.updated || null,
-          hasSummary: !!data.summary,
-          is_active: activeChatProcesses.has(data.key || f.replace('.json', ''))
-        };
-      } catch (e) {
-        return { key: f.replace('.json', ''), title: f.replace('.json', ''), messageCount: 0 };
+
+    const sessions = [];
+    const agentKey = req.params.agentKey;
+    const files = fs.readdirSync(dir).filter(f => {
+      if (f === 'heartbeat.json' || f === 'heartbeat.jsonl' || f.endsWith('.migrated')) return false;
+      if (!f.endsWith('.json') && !f.endsWith('.jsonl')) return false;
+      if (f.endsWith('.meta.json')) return false;
+
+      // Strict filtering: sessions in this folder MUST belong to this agent's prefix
+      if (agentKey === 'main') {
+        // 'main' agent sees 'agent_main_' OR legacy files (no 'agent_' prefix)
+        return f.startsWith('agent_main_') || !f.startsWith('agent_');
+      } else {
+        // named agents ONLY see their own prefix
+        return f.startsWith(`agent_${agentKey}_`);
       }
     });
-    res.json(sessions.sort((a, b) => (b.updated || '').localeCompare(a.updated || '')));
-  } catch (e) { res.status(404).json({ error: e.message }); }
+    for (const f of files) {
+      if (f === 'heartbeat.json' || f === 'heartbeat.jsonl' || f.endsWith('.migrated')) continue;
+      if (!f.endsWith('.json') && !f.endsWith('.jsonl')) continue;
+      if (f.endsWith('.meta.json')) continue;
+
+      const fpath = path.join(dir, f);
+      try {
+        let key, summary = '', model = '', messageCount = 0, updated = null, created = null;
+
+        if (f.endsWith('.jsonl')) {
+          const metaPath = fpath.replace('.jsonl', '.meta.json');
+          key = f.replace('.jsonl', '');
+          if (fs.existsSync(metaPath)) {
+            const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+            key = m.key || key;
+            summary = m.summary || '';
+            messageCount = m.count || 0;
+            updated = m.updated_at || m.UpdatedAt || null;
+            created = m.created_at || m.CreatedAt || null;
+          }
+        } else {
+          const data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
+          key = data.key || f.replace('.json', '');
+          summary = data.summary || '';
+          model = data.model || data.webui_model || '';
+          messageCount = data.messages?.length || 0;
+          updated = data.updated || null;
+          created = data.created || null;
+        }
+
+        sessions.push({
+          key,
+          title: summary || key,
+          model,
+          messageCount,
+          updated,
+          created,
+          hasSummary: !!summary,
+          is_active: activeChatProcesses.has(`${req.params.agentKey}:${key}`)
+        });
+      } catch (e) { }
+    }
+    // Sort by updated time (desc)
+    sessions.sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
+    res.json(sessions);
+  } catch (e) {
+    console.error('[Sessions Error]', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 
 
-// Helper to find session file by key
+// Helper to find session file by key (supports .json and .jsonl)
 function findSessionFile(dir, sessionKey) {
   if (!fs.existsSync(dir)) return null;
 
-  // 1. Try direct match based on safe name
-  const safeName = sessionKey.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const directPath = path.join(dir, `${safeName}.json`);
-  if (fs.existsSync(directPath)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(directPath, 'utf-8'));
-      if ((data.key || safeName) === sessionKey) return directPath;
-    } catch (e) { }
+  // OPTIMIZATION: Try direct file match first
+  const sanitizedKey = sessionKey.replace(/[\\/:*?"<>|]/g, '_').replace(/:/g, '_');
+
+  const jsonlPath = path.join(dir, sanitizedKey + '.jsonl');
+  if (fs.existsSync(jsonlPath)) return jsonlPath;
+
+  const jsonPath = path.join(dir, sanitizedKey + '.json');
+  if (fs.existsSync(jsonPath)) return jsonPath;
+
+  const files = fs.readdirSync(dir);
+
+  // 1. Precise match via readdir
+  for (const f of files) {
+    if (f.endsWith('.meta.json') || f.endsWith('.migrated')) continue;
+    const baseName = f.replace(/\.jsonl?$/, '');
+    if (baseName === sanitizedKey) return path.join(dir, f);
   }
 
-  // 2. Fallback: Scan directory
-  const files = fs.readdirSync(dir);
+  // 2. Resilience: Handle expanded keys (e.g. 'agent:queen:main' vs 'agent:queen:main:main' from official UI)
   for (const f of files) {
-    if (!f.endsWith('.json') || f === 'heartbeat.json') continue;
-    const fpath = path.join(dir, f);
-    try {
-      const data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
-      const fileKey = data.key || f.replace('.json', '');
-      if (fileKey === sessionKey) return fpath;
-    } catch (e) { }
+    if (f.endsWith('.meta.json') || f.endsWith('.migrated')) continue;
+
+    // If the file starts with our sanitizedKey, it might be the expanded version
+    const baseName = f.replace(/\.jsonl?$/, '');
+    if (baseName.startsWith(sanitizedKey + '_')) {
+      return path.join(dir, f);
+    }
   }
+
+  // 3. Deep check inside meta files
+  for (const f of files) {
+    if (!f.endsWith('.jsonl')) continue;
+    const metaPath = path.join(dir, f.replace('.jsonl', '.meta.json'));
+    if (fs.existsSync(metaPath)) {
+      try {
+        const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        // Match exact or startWith (for expanded official keys)
+        if (m.key === sessionKey || (m.key && m.key.startsWith(sessionKey + ':'))) return path.join(dir, f);
+      } catch (e) { }
+    }
+  }
+
   return null;
 }
 
@@ -768,7 +980,29 @@ app.get('/api/agents/:agentKey/sessions/:sessionKey', async (req, res) => {
     const fpath = findSessionFile(dir, sessionKey);
     if (fpath) {
       try {
-        const data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
+        let data;
+        if (fpath.endsWith('.jsonl')) {
+          const messages = readJsonl(fpath);
+          const metaPath = fpath.replace('.jsonl', '.meta.json');
+          let meta = { key: sessionKey, summary: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+          if (fs.existsSync(metaPath)) {
+            try {
+              const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+              meta = { ...meta, ...m };
+            } catch (e) { }
+          }
+          data = {
+            key: meta.key || sessionKey,
+            summary: meta.summary || '',
+            messages: messages,
+            created: meta.created_at || meta.CreatedAt || new Date().toISOString(),
+            updated: meta.updated_at || meta.UpdatedAt || new Date().toISOString(),
+            model: meta.model || ''
+          };
+        } else {
+          data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
+        }
+
         data.webui_model = data.model || data.webui_model || '';
         const procKey = `${req.params.agentKey}:${sessionKey}`;
         data.is_active = activeChatProcesses.has(procKey);
@@ -1019,9 +1253,17 @@ app.post('/api/chat/stream', async (req, res) => {
   // ── Mode A: Route through picoclaw agent (tools + skills enabled) ────────
   if (usePicoclaw !== false) {
     try {
+      // Prefix-based routing override: if sessionKey specifies an agent, use that agent's config & workspace.
+      let effectiveAgentKey = agentKey;
+      if (sessionKey && sessionKey.startsWith('agent:')) {
+        const parts = sessionKey.split(':');
+        if (parts.length >= 2) effectiveAgentKey = parts[1];
+      }
+
       const config = await readConfig();
-      const agentCfg = config?.agents?.[agentKey] || {};
-      const workspace = resolveWorkspace(agentCfg.workspace);
+      const agentsMap = normalizeAgents(config);
+      const agentCfg = agentsMap[effectiveAgentKey] || {};
+      const absoluteWorkspace = resolveWorkspace(agentCfg.workspace);
       const effectiveModel = model || agentCfg.model || '';
 
       // Create a virtual config directory for this specific call to force the CLI to use the correct workspace
@@ -1031,13 +1273,14 @@ app.post('/api/chat/stream', async (req, res) => {
 
       // Build a config where the chosen agent's workspace is the GLOBAL DEFAULT for the CLI's point of view
       // We MUST resolve the workspace to an ABSOLUTE path here, because the spawned process will have a redirected HOME
+
       const virtualConfig = {
         ...config,
         agents: {
           ...config.agents,
           defaults: {
             ...(config.agents?.defaults || {}),
-            workspace: resolveWorkspace(agentCfg.workspace), // Resolve to absolute path
+            workspace: absoluteWorkspace, // Resolve to absolute path
             temperature: temperature,
             max_tokens: maxTokens,
             top_p: top_p,
@@ -1049,9 +1292,48 @@ app.post('/api/chat/stream', async (req, res) => {
           }
         }
       };
+
+      // Also ensure the specific agent entry in the list/map points to the absolute workspace
+      // AND set it as the ONLY default agent to force Go core routing.
+      if (Array.isArray(virtualConfig.agents?.list)) {
+        let found = false;
+        virtualConfig.agents.list = virtualConfig.agents.list.map(a => {
+          const isTarget = a.id === effectiveAgentKey;
+          if (isTarget) found = true;
+          return {
+            ...a,
+            workspace: isTarget ? absoluteWorkspace : a.workspace,
+            default: isTarget // Force this one as default
+          };
+        });
+        // If the agent was implicit (not in list), add it explicitly
+        if (!found) {
+          virtualConfig.agents.list.push({
+            id: effectiveAgentKey,
+            name: effectiveAgentKey === 'main' ? '默认 Agent' : effectiveAgentKey,
+            workspace: absoluteWorkspace,
+            default: true
+          });
+        }
+      } else if (virtualConfig.agents) {
+        // Handle map format: first set all to non-default
+        Object.keys(virtualConfig.agents).forEach(k => {
+          if (k !== 'defaults' && typeof virtualConfig.agents[k] === 'object') {
+            virtualConfig.agents[k].default = false;
+          }
+        });
+        // Ensure the agent exists in the map (even if implicit)
+        virtualConfig.agents[effectiveAgentKey] = {
+          ...(virtualConfig.agents[effectiveAgentKey] || {}),
+          id: effectiveAgentKey,
+          workspace: absoluteWorkspace,
+          default: true // Force this one as default
+        };
+      }
+
       fs.writeFileSync(path.join(virtualDotPico, 'config.json'), JSON.stringify(virtualConfig, null, 2));
 
-      console.log(`[Chat] PicoClaw Mode: agent=${agentKey} workspace=${workspace} (VirtualHome: ${virtualHome})`);
+      console.log(`[Chat] PicoClaw Mode: agent=${effectiveAgentKey} workspace=${absoluteWorkspace} (VirtualHome: ${virtualHome})`);
 
       // Build picoclaw agent args
       const args = ['agent', '-m', userMessage];

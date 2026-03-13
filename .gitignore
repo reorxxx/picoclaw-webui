@@ -25,3 +25,8 @@ Thumbs.db
 # Temporary/Dummy scripts
 test_drop.js
 restart_server.sh
+
+# Environment and Data
+.env*
+public/avatars/*
+!public/avatars/.gitkeep

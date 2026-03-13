@@ -56,3 +56,20 @@
 .markdown-body pre code {
   @apply bg-transparent p-0 text-gray-200 text-sm;
 }
+
+/* Table Styles */
+.prose table, .markdown-body table {
+  @apply border-collapse w-full my-4 text-sm border border-white/10;
+}
+
+.prose th, .markdown-body th {
+  @apply bg-white/5 font-bold p-2.5 text-left border border-white/10 text-gray-200;
+}
+
+.prose td, .markdown-body td {
+  @apply p-2.5 border border-white/10 text-gray-300;
+}
+
+.prose tr:nth-child(even), .markdown-body tr:nth-child(even) {
+  @apply bg-white/5;
+}

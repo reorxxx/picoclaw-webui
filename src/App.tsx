@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, memo } from 'react';
 import { flushSync } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import {
     Settings, Bot, Send, Loader2, Power, Terminal, Save,
     Plus, MessageSquare, ChevronRight, ChevronDown, Cpu, Brain,
@@ -26,6 +27,7 @@ interface Message {
     reasoning_content?: string;
     logs?: string[];
     timestamp?: string;
+    isHidden?: boolean;
 }
 interface Session {
     key: string; title: string; model: string;
@@ -247,10 +249,10 @@ function CodeBlock({ inline, className, children, node, ...props }: any) {
 }
 
 const MemoizedMessageGroup = memo(({
-    group, isStreaming, isLastGroup, userAvatar, agentAvatar, activeAgent, effectiveModelDisplay, enableThinking
+    group, isStreaming, isLastGroup, userAvatar, agentAvatar, displayName, effectiveModelDisplay, enableThinking
 }: {
     group: Message[]; isStreaming: boolean; isLastGroup: boolean;
-    userAvatar: string; agentAvatar: string; activeAgent: string | null; effectiveModelDisplay: string;
+    userAvatar: string; agentAvatar: string; displayName: string; effectiveModelDisplay: string;
     enableThinking: boolean;
 }) => {
     const isUser = group[0].role === 'user';
@@ -280,7 +282,10 @@ const MemoizedMessageGroup = memo(({
                     steps.push({ type: 'think', content: reasoning });
                 }
 
-                if (text) finalContent += text;
+                if (text) {
+                    if (finalContent) finalContent += '\n\n';
+                    finalContent += text;
+                }
 
             } else if (msg.role === 'tool') {
                 steps.push({ type: 'tool', content: msg.content || '(empty output)' });
@@ -303,23 +308,6 @@ const MemoizedMessageGroup = memo(({
                 size="md"
             />
             <div className={`flex flex-col flex-1 min-w-0 ${isUser ? 'items-end' : 'items-start'}`}>
-                <div className={`flex flex-col mb-1.5 px-1 ${isUser ? 'items-end' : 'items-start'}`}>
-                    <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tight">
-                            {isUser ? 'You' : (activeAgent || 'Agent')}
-                        </span>
-                        {firstMsg.timestamp && (
-                            <span className="text-[9px] text-gray-400/80 tabular-nums">
-                                · {new Date(firstMsg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                            </span>
-                        )}
-                    </div>
-                    {!isUser && effectiveModelDisplay && (
-                        <span className="text-[9px] text-gray-500/80 font-mono">
-                            {effectiveModelDisplay}
-                        </span>
-                    )}
-                </div>
 
                 {showBubble && (
                     <div className={`p-3.5 rounded-2xl text-sm leading-relaxed break-words max-w-[90%] ${isUser
@@ -372,7 +360,7 @@ const MemoizedMessageGroup = memo(({
 
                                 {finalContent && (
                                     <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]}
+                                        remarkPlugins={[remarkGfm, remarkBreaks]}
                                         components={{ code: CodeBlock as any }}
                                         className="prose prose-invert prose-sm max-w-none text-[13px] leading-relaxed break-words mt-1"
                                     >
@@ -390,6 +378,24 @@ const MemoizedMessageGroup = memo(({
                         )}
                     </div>
                 )}
+
+                <div className={`flex flex-col mt-1.5 px-1 ${isUser ? 'items-end' : 'items-start'}`}>
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tight">
+                            {isUser ? 'You' : displayName}
+                        </span>
+                        {firstMsg.timestamp && (
+                            <span className="text-[9px] text-gray-400/80 tabular-nums">
+                                · {new Date(firstMsg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                            </span>
+                        )}
+                        {!isUser && effectiveModelDisplay && (
+                            <span className="text-[9px] text-gray-500/80 font-mono">
+                                · {effectiveModelDisplay}
+                            </span>
+                        )}
+                    </div>
+                </div>
 
                 {/* Render the ToolActionDisplay completely outside of the bubble */}
                 {!isUser && isLastGroup && isStreaming && (
@@ -703,7 +709,7 @@ export default function App() {
                 (async () => {
                     await fetchAgentSessions(firstKey);
                     const sessions: Session[] = await (await fetch(`${API}/api/agents/${encodeURIComponent(firstKey)}/sessions`)).json();
-                    const mainSess = sessions.find(s => s.key === `agent:${firstKey}:main` || s.key === 'agent:main:main');
+                    const mainSess = sessions.find(s => s.key === `agent:${firstKey}:main`);
                     if (mainSess) {
                         setActiveSession(mainSess.key);
                     } else if (sessions.length > 0) {
@@ -875,7 +881,8 @@ export default function App() {
         const agentKey = createSessionAgentInput;
         setCreateSessionAgentInput(null);
         // Ensure PicoClaw-compatible session key format
-        const sessionKey = newSessionName.startsWith('agent:') ? newSessionName : `agent:main:${newSessionName.replace(/[^a-zA-Z0-9_\-]/g, '_')}`;
+        const agentKeyForSession = createSessionAgentInput || activeAgent || 'main';
+        const sessionKey = newSessionName.startsWith('agent:') ? newSessionName : `agent:${agentKeyForSession}:${newSessionName.replace(/[^a-zA-Z0-9_\-]/g, '_')}`;
         try {
             await fetch(`${API}/api/agents/${encodeURIComponent(agentKey)}/sessions`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1002,7 +1009,7 @@ export default function App() {
         }
     }, [isStreaming]);
 
-    const handleSend = async (overrideMsg?: string) => {
+    const handleSend = async (overrideMsg?: string, options: { isHidden?: boolean } = {}) => {
         let userMsg = overrideMsg !== undefined ? overrideMsg : input.trim();
         if (!userMsg && !isStreaming) return; // Allow empty msg only for stop button if streaming
         if (!activeAgent || !activeSession) return;
@@ -1039,9 +1046,9 @@ export default function App() {
             setInput('');
             if (textareaRef.current) textareaRef.current.style.height = 'auto';
             const nameParam = userMsg.slice(4).trim();
-            // Use PicoClaw CLI-compatible session key format: agent:main:{name}
+            // Use PicoClaw CLI-compatible session key format: agent:{agentKey}:{name}
             const safeName = (nameParam || ('chat_' + Date.now())).replace(/[^a-zA-Z0-9_\-]/g, '_');
-            const sessionKey = `agent:main:${safeName}`;
+            const sessionKey = `agent:${activeAgent}:${safeName}`;
             try {
                 const res = await fetch(`${API}/api/agents/${encodeURIComponent(activeAgent)}/sessions`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1050,7 +1057,15 @@ export default function App() {
                 const data = await res.json();
                 await fetchAgentSessions(activeAgent);
                 setActiveSession(data.key || sessionKey);
-                loadSession(activeAgent, data.key || sessionKey);
+
+                // Send system prompt to trigger greeting reading context (HIDDEN)
+                const systemPrompt = `[SYSTEM COMMAND (DO NOT READ ALOUD)]: 本次对话已被重置。请在后台重新读取你的 \`IDENTITY.md\`、\`SOUL.md\`、\`AGENT.md\`、\`USER.md\` 以及 \`MEMORY.md\` 文件设定，以此重新构建你当下的人设。理解完成后，以第一人称主动向我打个招呼，说句好听的话。`;
+
+                setMessages([{ role: 'assistant', content: '✅ 已创建新会话并同步身份信息。', logs: [] }]);
+
+                setTimeout(() => {
+                    handleSend(systemPrompt, { isHidden: true });
+                }, 500);
             } catch (e) {
                 console.error("Failed to create session via /new", e);
             }
@@ -1108,11 +1123,11 @@ export default function App() {
                 // We fake a user message visually, but actually send the system command
                 setMessages([{ role: 'assistant', content: '✅ 会话已彻底重启。身份信息和记忆已重新载入。', logs: [] }]);
 
-                // Trigger the actual backend generation with the system prompt
-                // Wait a tiny bit for React state to settle
+                // Trigger the actual backend generation with the system prompt (HIDDEN)
+                // We pass the prompt but handleSend will use its own state update logic
                 setTimeout(() => {
-                    handleSend(systemPrompt);
-                }, 500);
+                    handleSend(systemPrompt, { isHidden: true });
+                }, 100);
 
             } catch (e) {
                 console.error("Failed to restart session", e);
@@ -1137,13 +1152,7 @@ export default function App() {
         }
 
         if (isStreaming) {
-            // If input is empty, treat as /stop request
-            if (!userMsg) {
-                // Trigger existing stop logic
-                setInput('/stop');
-                handleSend('/stop');
-                return;
-            }
+            if (!userMsg) return;
             // Otherwise, queue the message
             setMessageQueue(prev => [...prev, userMsg]);
             setInput('');
@@ -1161,9 +1170,10 @@ export default function App() {
         historySavedRef.current = '';
 
         const timestamp = new Date().toISOString();
-        const newMsgs = [...messages, { role: 'user', content: userMsg, timestamp }];
+        const userMsgObj: Message = { role: 'user', content: userMsg, timestamp, isHidden: options.isHidden };
+
         if (currentChatRef.current.agent === activeAgent && currentChatRef.current.session === activeSession) {
-            setMessages(newMsgs);
+            setMessages(prev => [...prev, userMsgObj]);
         }
         setIsStreaming(true);
 
@@ -1205,13 +1215,15 @@ export default function App() {
             setIsStreaming(true);
             setStreamingSessions(prev => ({ ...prev, [`${requestAgent}:${requestSession}`]: true }));
 
-            let currentSessionMessages = [...messages, { role: 'user', content: userMsg, timestamp }, { role: 'assistant', content: '', logs: [] }];
+            let currentSessionMessages: Message[] = [];
+            setMessages(prev => {
+                const updated = [...prev, { role: 'assistant', content: '', logs: [] }];
+                currentSessionMessages = updated;
+                return updated;
+            });
+
             const cacheKey = `${requestAgent}:${requestSession}`;
             if (requestSession) sessionCacheRef.current[cacheKey] = currentSessionMessages;
-
-            if (currentChatRef.current.agent === requestAgent && currentChatRef.current.session === requestSession) {
-                setMessages(currentSessionMessages);
-            }
 
             const res = await fetch(`${API}/api/chat/stream`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1289,12 +1301,24 @@ export default function App() {
 
                         if (requestSession && requestAgent) sessionCacheRef.current[`${requestAgent}:${requestSession}`] = currentSessionMessages;
 
-                        // Throttle rapid re-renders to ~10fps 
                         const now = Date.now();
                         if (now - lastRenderTime > 100) {
                             lastRenderTime = now;
                             if (currentChatRef.current.agent === requestAgent && currentChatRef.current.session === requestSession) {
-                                setMessages(currentSessionMessages);
+                                setMessages(prev => {
+                                    const updated = [
+                                        ...prev.slice(0, -1),
+                                        {
+                                            ...prev[prev.length - 1],
+                                            content: assistantMsg,
+                                            reasoning_content: assistantReasoning || undefined,
+                                            logs: assistantLogs.length > 0 ? assistantLogs : undefined,
+                                            timestamp: new Date().toISOString()
+                                        }
+                                    ];
+                                    currentSessionMessages = updated;
+                                    return updated;
+                                });
                             }
                         }
                     } catch (e) { }
@@ -1302,7 +1326,20 @@ export default function App() {
 
                 // Force a final guaranteed render after processing the entire batch
                 if (currentChatRef.current.agent === requestAgent && currentChatRef.current.session === requestSession) {
-                    setMessages(currentSessionMessages);
+                    setMessages(prev => {
+                        const updated = [
+                            ...prev.slice(0, -1),
+                            {
+                                ...prev[prev.length - 1],
+                                content: assistantMsg,
+                                reasoning_content: assistantReasoning || undefined,
+                                logs: assistantLogs.length > 0 ? assistantLogs : undefined,
+                                timestamp: new Date().toISOString()
+                            }
+                        ];
+                        currentSessionMessages = updated;
+                        return updated;
+                    });
                 }
             }
 
@@ -1316,7 +1353,7 @@ export default function App() {
             // Only show error if we are still on the same chat
             if (currentChatRef.current.agent === requestAgent && currentChatRef.current.session === requestSession) {
                 const errMsg = `**Network Error:** ${(err as Error).message}`;
-                setMessages(m => [...m, { role: 'assistant', content: errMsg }]);
+                setMessages(prev => [...prev, { role: 'assistant', content: errMsg }]);
                 if (!usePicoclaw) {
                     await persistMessage('assistant', errMsg);
                 }
@@ -1475,6 +1512,7 @@ export default function App() {
     const groupedMessages = useMemo(() => {
         const groups: Message[][] = [];
         for (const m of messages) {
+            if (m.isHidden || (m.content && m.content.startsWith('[SYSTEM COMMAND (DO NOT READ ALOUD)]'))) continue;
             if (m.role === 'user') {
                 groups.push([m]);
             } else {
@@ -1565,7 +1603,7 @@ export default function App() {
                                                     (async () => {
                                                         await fetchAgentSessions(agent.key);
                                                         const sessions: Session[] = await (await fetch(`${API}/api/agents/${encodeURIComponent(agent.key)}/sessions`)).json();
-                                                        const mainSess = sessions.find(s => s.key === `agent:${agent.key}:main` || s.key === 'agent:main:main');
+                                                        const mainSess = sessions.find(s => s.key === `agent:${agent.key}:main`);
                                                         if (mainSess) {
                                                             setActiveSession(mainSess.key);
                                                         } else if (sessions.length > 0) {
@@ -2162,6 +2200,7 @@ export default function App() {
                                             userAvatar={userAvatar}
                                             agentAvatar={agentAvatar}
                                             activeAgent={activeAgent}
+                                            displayName={agents.find(a => a.key === activeAgent)?.displayName || activeAgent || 'Agent'}
                                             effectiveModelDisplay={effectiveModelDisplay}
                                             enableThinking={(() => {
                                                 const currentModel = getEffectiveModel();

@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "clsx": "^2.1.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
@@ -19,6 +20,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.1",
+    "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.0",
     "tailwind-merge": "^2.2.1",
     "zustand": "^5.0.11"
